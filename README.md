@@ -295,7 +295,7 @@ This is the most portable option: it uses no thread tricks, has no depth limit b
 - **With the `virtual` backend the body runs on a virtual thread**, so `Thread.currentThread()` differs from the caller's, thread-locals the body reads or writes are not the caller's, and the context class loader may differ. Interrupts reach the caller; the transform waits for the segment to finish.
 - **With the `virtual` backend, locks held by the caller are not held by the body.** If the caller holds a `ReentrantLock` or a monitor and the body tries to take it, it blocks on the caller, which is waiting for the body: a deadlock. Don't annotate methods that are entered while holding a lock the recursion also takes.
 - **With the `virtual` backend, a pinned caller can starve the scheduler.** A caller that is itself a pinned virtual thread blocks its carrier while waiting for the body's virtual thread, which needs a carrier of its own. With the carriers all pinned this deadlocks.
-- **`interval` frames must fit in the stack the segment runs on:** a carrier's for `virtual`, the caller's remaining stack for `continuation`, so a small pool thread already deep in its own work has less room. Too large an interval fails with `StackOverflowError` between yields (the spike hit this at 4096 with a 512K stack). The default of 1024 suits normal frame sizes; large frames need less.
+- **`interval` frames must fit in the stack the segment runs on:** a carrier's for `virtual`, the caller's remaining stack for `continuation`, so a small pool thread already deep in its own work has less room. Too large an interval fails with `StackOverflowError` between yields (the spike hit this at 4096 with a 512K stack). The default of 1024 suits normal frame sizes; large frames need less. On the `continuation` backend the segment runs on the caller's stack, and 1024 already overflowed a 512 KB thread in the integration tests (256 was fine).
 - **Pinning prevents yielding.** Native frames or critical sections make a yield do nothing (a no-op `Thread.yield()`, or the pinned `IllegalStateException` the continuation backend catches), so the recursion proceeds on the stack until the next interval at which it is no longer pinned. Pinning with the `continuation` backend and held monitors is untested.
 - **The `continuation` backend is internal API.** It needs the `jdk.internal.vm` export and is validated only on the JDKs the tests have run on.
 - **`PARAMETER` mode only redirects statically bound calls:** `static`, `private`, `final`, or methods of a `final` class. Other virtual calls still work but restart the parameter depth at the entry point (the agent warns). Use `THREAD_LOCAL` for those.
@@ -303,6 +303,18 @@ This is the most portable option: it uses no thread tricks, has no depth limit b
 - **Constructors and abstract/native methods cannot be annotated** (ignored with a warning).
 - **Stack traces and debuggers** show the synthetic `$ss`, `$ss$body` and `$ss$thunk` frames and the virtual thread's `run` boundary.
 - **Class files are read as resources, not by loading classes**, so frame computation falls back to `Object` for types it cannot find.
+
+## Tests
+
+`mvn verify` runs three suites (last run: JDK 26, all passing):
+
+| Suite | What it covers | Result |
+|---|---|---|
+| `StackSafeTransformerTest`, `virtual` backend | 22 tests through a transforming classloader on 1 MB-stack threads, interval 256: 2M-deep left-deep tree, mutual recursion, void/wide/object returns, exception types, both depth modes, mixed modes, overrides and `super` calls, interfaces, annotation and signature preservation, depth counter not leaking to the caller | 22 passed |
+| `StackSafeTransformerTest`, `continuation` backend | The same 22 tests with `--add-exports` and `-Dstacksafe.backend=continuation`, including thread identity and caller thread-locals being visible | 22 passed |
+| `AgentIT` (`verify` phase) | 5 end-to-end tests in a forked JVM with `-javaagent` on the shaded jar, running a 1M-deep recursion on a 512 KB-stack thread: default backend, `virtual` with `interval=256`, `continuation` with the agent doing the export (no `--add-exports`), the same program without the agent (fails with `StackOverflowError`), and bad agent options failing at startup | 5 passed |
+
+Finding from the integration tests: with `backend=continuation` and the default `interval=1024`, the 512 KB stack overflows inside `Continuation.doYield` at the first yield; `interval=128` and `256` work. The `virtual` backend at 1024 on the same stack is fine, since its segment runs on a carrier thread's stack, not the caller's. So on the `continuation` backend, size `interval` to the caller's stack.
 
 ## Spike numbers
 
